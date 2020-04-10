@@ -1,0 +1,143 @@
+---
+- hosts: default
+
+  vars:
+    conda_ver: "4.8.2"
+    python_ver: "3.8"
+    miniconda_installer_url_prefix: "https://repo.anaconda.com/miniconda/"
+    miniconda_installer_checksum: "md5:cbda751e713b5a95f187ae70b509403f"
+
+    swm_user_name: sw
+    swm_sw_dir: /opt/sw
+    swm_conda_prefix: "{{ swm_sw_dir }}/conda"
+
+    python_ver_parts: "{{ python_ver.split('.')|list }}"
+    miniconda_installer_name_parts:
+      - "Miniconda{{ python_ver_parts[0] }}"
+      - "py{{ ''.join(python_ver_parts[0:2]) }}_{{ conda_ver }}"
+      - Linux
+      - x86_64.sh
+    miniconda_installer_name: "{{ miniconda_installer_name_parts|join('-') }}"
+    miniconda_installer_url: "{{ miniconda_installer_url_prefix }}{{ miniconda_installer_name }}"
+
+    local: "/vagrant"
+    downloads: "{{ local }}/downloads"
+    out: "{{ local }}/out"
+    tests: "{{ local }}/tests"
+    remote: "/home/vagrant"
+
+  tasks:
+    - name: downloads and other local setup
+      become: no
+      block:
+        - name: local directories
+          loop_control:
+            label: "{{ item }}"
+          loop:
+            - "{{ downloads }}"
+            - "{{ out }}"
+          file:
+            path: "{{ item }}"
+            state: directory
+        - name: miniconda installer
+          get_url:
+            url: "{{ miniconda_installer_url }}"
+            dest: "{{ downloads }}/"
+            checksum: "{{ miniconda_installer_checksum }}"
+        - name: miniconda installer help
+          command:
+            creates: "{{ out }}/miniconda_installer_help.json"
+            argv:
+              - "{{ downloads }}/{{ miniconda_installer_name }}"
+              - "-h"
+          register: miniconda_installer_help
+          ignore_errors: yes
+        - name: "{{ out }}/miniconda_installer_help.json"
+          copy:
+            dest: "{{ out }}/miniconda_installer_help.json"
+            content: "{{ miniconda_installer_help|to_nice_json }}"
+
+    - name: system configuration changes that might require a reboot
+      become: yes
+      block:
+        - name: selinux targeted enforcing
+          selinux:
+            policy: targeted
+            state: enforcing
+          register: selinux_status
+        - name: reboot if necessary
+          when: selinux_status.reboot_required
+          reboot:
+
+    - name: software manager preparation
+      become: yes
+      block:
+        - name: software manager user
+          user:
+            state: present
+            name: "{{ swm_user_name }}"
+        - name: conda prefix
+          file:
+            path: "{{ swm_sw_dir }}"
+            state: directory
+            owner: "{{ swm_user_name }}"
+            mode: 0755
+
+    - name: miniconda deployment
+      become_user: "{{ swm_user_name }}"
+      become: yes
+      block:
+        - name: miniconda installation
+          command:
+            creates: "{{ swm_conda_prefix }}/bin/activate"
+            argv:
+              - "{{ downloads }}/{{ miniconda_installer_name }}"
+              - -b
+              - -p
+              - "{{ swm_conda_prefix }}"
+              # "-f           no error if install prefix already exists",
+              # "-s           skip running pre/post-link/install scripts",
+              # "-u           update an existing installation",
+
+    - name: test conda
+      become: no
+      block:
+        - name: run conda tests
+          loop_control:
+            label: "test_conda_{{ item }}"
+          loop:
+            - info
+            - list
+            - create
+            - createwithpython
+          shell:
+            argv:
+              - bash
+              - -c
+              - ". {{ swm_conda_prefix }}/bin/activate && . {{ tests }}/test_conda_{{ item }}.sh"
+          register: run_conda_tests
+        - name: "{{ run_conda_tests }}"
+          copy:
+            dest: "{{ out }}/run_conda_tests.json"
+            content: "{{ run_conda_tests|to_nice_json }}"
+        - name: save test results
+          loop_control:
+            label: "{{ out }}/test_conda_{{ item.item }}.json"
+          loop: "{{ run_conda_tests.results }}"
+          copy:
+            dest: "{{ out }}/test_conda_{{ item.item }}.json"
+            content: "{{ item|to_nice_json }}"
+        - name: save test stdout
+          loop_control:
+            label: "{{ out }}/test_conda_{{ item.item }}.stdout"
+          loop: "{{ run_conda_tests.results }}"
+          copy:
+            dest: "{{ out }}/test_conda_{{ item.item }}.stdout"
+            content: "{{ item.stdout }}"
+        - name: save test stderr
+          loop_control:
+            label: "{{ out }}/test_conda_{{ item.item }}.stderr"
+          loop: "{{ run_conda_tests.results }}"
+          copy:
+            dest: "{{ out }}/test_conda_{{ item.item }}.stderr"
+            content: "{{ item.stderr }}"
