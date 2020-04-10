@@ -1,0 +1,1 @@
+# test-el7-shared-miniconda-vagrant
